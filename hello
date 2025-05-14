@@ -1,18 +1,15 @@
 @Override
-public String requestSwap(int employeeId) throws ShiftNotFoundException, ShiftSwapNotAllowedException {
-	logger.info("Requesting shift swap for employeeId: {}", employeeId);
-	Shift shift = repository.findByEmployeeId(employeeId)
-			.orElseThrow(() -> new ShiftNotFoundException(
-					String.format(SHIFT_NOT_FOUND + " for employee ID %d", employeeId)));
+	public String approveSwapByEmployeeId(int employeeId) {
+		logger.info("Approving swap for employeeId: {}", employeeId);
+		Shift shift = repository.findByEmployeeId(employeeId).orElseThrow(() -> new ShiftNotFoundException(String.format(SHIFT_NOT_FOUND + " for employee ID %d", employeeId)));
 
-	// Prevent swap for past dates
-	if (shift.getDate().isBefore(LocalDate.now())) {
-		logger.warn("Attempt to swap past shift for employeeId: {}", employeeId);
-		throw new ShiftSwapNotAllowedException("Cannot request swap for a past shift.");
+		if (shift.isSwapRequested()) {
+			shift.setSwapRequested(false);
+			repository.save(shift);
+			logger.info(String.format(SWAP_APPROVED, employeeId));
+			return String.format(SWAP_APPROVED, employeeId);
+		} else {
+			logger.info(String.format(NO_SWAP_REQUEST_FOUND, employeeId));
+			return String.format(NO_SWAP_REQUEST_FOUND, employeeId);
+		}
 	}
-
-	shift.setSwapRequested(true);
-	repository.save(shift);
-	logger.info(String.format(SWAP_REQUEST_SUBMITTED, employeeId));
-	return String.format(SWAP_REQUEST_SUBMITTED, employeeId);
-}
