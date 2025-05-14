@@ -1,109 +1,205 @@
-package com.example.demo.exception;
+package com.example.demo.service;
 
-public class DuplicateShiftException extends RuntimeException {
-    public DuplicateShiftException(String message) {
-        super(message);
-    }
-}
+import java.time.LocalDate;
+import java.util.*;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
 
+import com.example.demo.exception.*;
+import com.example.demo.model.Shift;
+import com.example.demo.repository.ShiftRepository;
 
-package com.example.demo.exception;
+import lombok.AllArgsConstructor;
 
-public class InvalidShiftTypeException extends RuntimeException {
-    public InvalidShiftTypeException(String message) {
-        super(message);
-    }
-}
+@Service
+@AllArgsConstructor
+public class ShiftServiceImp implements ShiftService {
 
+	private static final Logger logger = LoggerFactory.getLogger(ShiftServiceImp.class);
 
+	private ShiftRepository repository;
 
-package com.example.demo.exception;
+	private static final String DAY_SHIFT = "Day";
+	private static final String NIGHT_SHIFT = "Night";
+	private static final String SHIFT_NOT_FOUND = "Shift not found";
+	private static final String SHIFT_DELETED = "Shift Deleted";
+	private static final String NO_SWAP_REQUEST_FOUND = "No swap request found for employee ID %d";
+	private static final String SWAP_REQUEST_SUBMITTED = "Swap request submitted for employee ID %d";
+	private static final String SWAP_APPROVED = "Swap approved for employee ID %d";
+	private static final String SWAP_REJECTED = "Swap request rejected for employee ID %d";
+	private static final String NO_MATCHING_SWAP_REQUESTS = "No matching Day-Night swap requests available.";
 
-public class ShiftSwapNotAllowedException extends RuntimeException {
-    public ShiftSwapNotAllowedException(String message) {
-        super(message);
-    }
-}
+	@Override
+	public List<Shift> findAll() {
+		logger.info("Fetching all shifts");
+		return repository.findAll();
+	}
 
+	@Override
+	public Shift findById(int id) throws ShiftNotFoundException {
+		logger.info("Fetching shift by ID: {}", id);
+		return repository.findById(id)
+				.orElseThrow(() -> {
+					logger.warn("Shift not found with ID: {}", id);
+					return new ShiftNotFoundException(SHIFT_NOT_FOUND);
+				});
+	}
 
+	@Override
+	public void save(Shift shift) {
+		logger.info("Saving shift for employeeId: {}", shift.getEmployeeId());
 
-package com.example.demo.exception;
+		// Prevent past date shift creation
+		if (shift.getDate().isBefore(LocalDate.now())) {
+			logger.warn("Attempt to save shift with past date: {}", shift.getDate());
+			throw new ShiftDateInPastException("Cannot create shift for past date.");
+		}
 
-public class ShiftDateInPastException extends RuntimeException {
-    public ShiftDateInPastException(String message) {
-        super(message);
-    }
-}
+		// Validate shift type
+		if (!DAY_SHIFT.equalsIgnoreCase(shift.getShiftType()) && !NIGHT_SHIFT.equalsIgnoreCase(shift.getShiftType())) {
+			logger.warn("Invalid shift type: {}", shift.getShiftType());
+			throw new InvalidShiftTypeException("Shift type must be 'Day' or 'Night'.");
+		}
 
+		// Check for duplicate (same employee, same date)
+		List<Shift> existing = repository.findShiftsByEmployeeId(shift.getEmployeeId());
+		for (Shift s : existing) {
+			if (s.getDate().equals(shift.getDate())) {
+				logger.warn("Duplicate shift for employeeId {} on {}", shift.getEmployeeId(), shift.getDate());
+				throw new DuplicateShiftException("Shift already exists for this employee on this date.");
+			}
+		}
 
+		repository.save(shift);
+	}
 
+	@Override
+	public String deleteById(int id) {
+		logger.info("Deleting shift with ID: {}", id);
+		repository.deleteById(id);
+		return SHIFT_DELETED;
+	}
 
-package com.example.demo.exception;
+	@Override
+	public String requestSwap(int employeeId) {
+		logger.info("Requesting shift swap for employeeId: {}", employeeId);
+		Shift shift = repository.findByEmployeeId(employeeId)
+				.orElseThrow(() -> new ShiftNotFoundException(String.format(SHIFT_NOT_FOUND + " for employee ID %d", employeeId)));
 
-import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.MethodArgumentNotValidException;
-import org.springframework.web.bind.annotation.ExceptionHandler;
-import org.springframework.web.bind.annotation.RestControllerAdvice;
+		// Prevent swap for past dates
+		if (shift.getDate().isBefore(LocalDate.now())) {
+			logger.warn("Attempt to swap past shift for employeeId: {}", employeeId);
+			throw new ShiftSwapNotAllowedException("Cannot request swap for a past shift.");
+		}
 
-import java.time.LocalDateTime;
-import java.util.HashMap;
-import java.util.Map;
+		shift.setSwapRequested(true);
+		repository.save(shift);
+		logger.info(String.format(SWAP_REQUEST_SUBMITTED, employeeId));
+		return String.format(SWAP_REQUEST_SUBMITTED, employeeId);
+	}
 
-@RestControllerAdvice
-public class GlobalExceptionHandler {
+	@Override
+	public String processSwapRequests() {
+		logger.info("Processing shift swap requests");
+		List<Shift> requestedShifts = repository.findBySwapRequestedTrue();
 
-    private static final String SHIFT_PATH = "/shifts";
+		List<Shift> dayShifts = new ArrayList<>();
+		List<Shift> nightShifts = new ArrayList<>();
 
-    private Map<String, Object> createResponse(HttpStatus status, String error, String message, String path) {
-        Map<String, Object> response = new HashMap<>();
-        response.put("timestamp", LocalDateTime.now());
-        response.put("status", status.value());
-        response.put("error", error);
-        response.put("message", message);
-        response.put("path", path);
-        return response;
-    }
+		for (Shift shift : requestedShifts) {
+			if (DAY_SHIFT.equalsIgnoreCase(shift.getShiftType())) {
+				dayShifts.add(shift);
+			} else if (NIGHT_SHIFT.equalsIgnoreCase(shift.getShiftType())) {
+				nightShifts.add(shift);
+			}
+		}
 
-    @ExceptionHandler(MethodArgumentNotValidException.class)
-    public ResponseEntity<Map<String, Object>> handleValidationExceptions(MethodArgumentNotValidException ex) {
-        String errorMessage = ex.getBindingResult().getAllErrors().get(0).getDefaultMessage();
-        return new ResponseEntity<>(createResponse(HttpStatus.BAD_REQUEST, "Validation Error", errorMessage, SHIFT_PATH), HttpStatus.BAD_REQUEST);
-    }
+		int swapCount = Math.min(dayShifts.size(), nightShifts.size());
+		if (swapCount == 0) {
+			logger.info(NO_MATCHING_SWAP_REQUESTS);
+			return NO_MATCHING_SWAP_REQUESTS;
+		}
 
-    @ExceptionHandler(ShiftNotFoundException.class)
-    public ResponseEntity<Map<String, Object>> handleShiftNotFound(ShiftNotFoundException ex) {
-        return new ResponseEntity<>(createResponse(HttpStatus.NOT_FOUND, "Shift Not Found", ex.getMessage(), SHIFT_PATH), HttpStatus.NOT_FOUND);
-    }
+		for (int i = 0; i < swapCount; i++) {
+			Shift day = dayShifts.get(i);
+			Shift night = nightShifts.get(i);
 
-    @ExceptionHandler(DuplicateShiftException.class)
-    public ResponseEntity<Map<String, Object>> handleDuplicateShift(DuplicateShiftException ex) {
-        return new ResponseEntity<>(createResponse(HttpStatus.CONFLICT, "Duplicate Shift", ex.getMessage(), SHIFT_PATH), HttpStatus.CONFLICT);
-    }
+			String temp = day.getShiftType();
+			day.setShiftType(night.getShiftType());
+			night.setShiftType(temp);
 
-    @ExceptionHandler(InvalidShiftTypeException.class)
-    public ResponseEntity<Map<String, Object>> handleInvalidShiftType(InvalidShiftTypeException ex) {
-        return new ResponseEntity<>(createResponse(HttpStatus.BAD_REQUEST, "Invalid Shift Type", ex.getMessage(), SHIFT_PATH), HttpStatus.BAD_REQUEST);
-    }
+			day.setSwapRequested(false);
+			night.setSwapRequested(false);
 
-    @ExceptionHandler(ShiftSwapNotAllowedException.class)
-    public ResponseEntity<Map<String, Object>> handleSwapNotAllowed(ShiftSwapNotAllowedException ex) {
-        return new ResponseEntity<>(createResponse(HttpStatus.FORBIDDEN, "Swap Not Allowed", ex.getMessage(), SHIFT_PATH), HttpStatus.FORBIDDEN);
-    }
+			repository.save(day);
+			repository.save(night);
+		}
 
-    @ExceptionHandler(ShiftAlreadySwappedException.class)
-    public ResponseEntity<Map<String, Object>> handleAlreadySwapped(ShiftAlreadySwappedException ex) {
-        return new ResponseEntity<>(createResponse(HttpStatus.BAD_REQUEST, "Already Swapped", ex.getMessage(), SHIFT_PATH), HttpStatus.BAD_REQUEST);
-    }
+		logger.info("{} Day-Night swaps processed successfully", swapCount);
+		return String.format("%d Day-Night swaps processed successfully.", swapCount);
+	}
 
-    @ExceptionHandler(ShiftDateInPastException.class)
-    public ResponseEntity<Map<String, Object>> handleDateInPast(ShiftDateInPastException ex) {
-        return new ResponseEntity<>(createResponse(HttpStatus.BAD_REQUEST, "Invalid Date", ex.getMessage(), SHIFT_PATH), HttpStatus.BAD_REQUEST);
-    }
+	@Override
+	public String approveSwapByEmployeeId(int employeeId) {
+		logger.info("Approving swap for employeeId: {}", employeeId);
+		Shift shift = repository.findByEmployeeId(employeeId)
+				.orElseThrow(() -> new ShiftNotFoundException(String.format(SHIFT_NOT_FOUND + " for employee ID %d", employeeId)));
 
-    @ExceptionHandler(Exception.class)
-    public ResponseEntity<Map<String, Object>> handleGeneric(Exception ex) {
-        return new ResponseEntity<>(createResponse(HttpStatus.INTERNAL_SERVER_ERROR, "Internal Server Error", ex.getMessage(), SHIFT_PATH), HttpStatus.INTERNAL_SERVER_ERROR);
-    }
+		if (shift.isSwapRequested()) {
+			shift.setSwapRequested(false);
+			repository.save(shift);
+			logger.info(String.format(SWAP_APPROVED, employeeId));
+			return String.format(SWAP_APPROVED, employeeId);
+		} else {
+			logger.info(String.format(NO_SWAP_REQUEST_FOUND, employeeId));
+			return String.format(NO_SWAP_REQUEST_FOUND, employeeId);
+		}
+	}
+
+	@Override
+	public String rejectSwapByEmployeeId(int employeeId) {
+		logger.info("Rejecting swap for employeeId: {}", employeeId);
+		Optional<Shift> optionalShift = repository.findByEmployeeId(employeeId);
+		if (optionalShift.isPresent()) {
+			Shift shift = optionalShift.get();
+			if (shift.isSwapRequested()) {
+				shift.setSwapRequested(false);
+				repository.save(shift);
+				logger.info(String.format(SWAP_REJECTED, employeeId));
+				return String.format(SWAP_REJECTED, employeeId);
+			} else {
+				logger.info(String.format(NO_SWAP_REQUEST_FOUND, employeeId));
+				return String.format(NO_SWAP_REQUEST_FOUND, employeeId);
+			}
+		}
+		logger.warn(String.format(SHIFT_NOT_FOUND + " for employee ID %d", employeeId));
+		throw new ShiftNotFoundException(String.format(SHIFT_NOT_FOUND + " for employee ID %d", employeeId));
+	}
+
+	@Override
+	public List<Shift> getShiftsByEmployeeId(int employeeId) {
+		logger.info("Fetching shifts for employeeId: {}", employeeId);
+		return repository.findShiftsByEmployeeId(employeeId);
+	}
+
+	@Override
+	public Map<String, Long> countShiftsByTypeForEmployee(int employeeId) {
+		logger.info("Counting shifts by type for employeeId: {}", employeeId);
+		List<Object[]> results = repository.countShiftsByTypeForEmployee(employeeId);
+		Map<String, Long> map = new HashMap<>();
+		for (Object[] row : results) {
+			String type = (String) row[0];
+			Long count = (Long) row[1];
+			map.put(type, count);
+		}
+		return map;
+	}
+
+	@Override
+	public List<Shift> getShiftsByDate(LocalDate date) {
+		logger.info("Fetching all shifts for date: {}", date);
+		return repository.getAllShiftsByDate(date);
+	}
 }
